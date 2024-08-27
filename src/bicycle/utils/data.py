@@ -658,6 +658,13 @@ def generate_weighted_graph(
 
         if is_dag:
             raise ValueError("Graph is not cyclic")
+
+    elif graph_type == "ring":
+      adjacency_matrix = np.zeros((nodes, nodes))
+      for i in range(nodes):
+        adjacency_matrix[i, (i+1)%nodes] = 1.0
+      graph = nx.DiGraph(adjacency_matrix)
+
     else:
         raise NotImplementedError(f"Graph {graph} not implemented")
 
