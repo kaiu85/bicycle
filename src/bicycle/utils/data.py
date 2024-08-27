@@ -665,6 +665,12 @@ def generate_weighted_graph(
         adjacency_matrix[i, (i+1)%nodes] = 1.0
       graph = nx.DiGraph(adjacency_matrix)
 
+    elif graph_type == "pairs":
+      adjacency_matrix = np.zeros((nodes, nodes))
+      for i in range(0,nodes,2):
+        adjacency_matrix[i, (i+1)%nodes] = 1.0
+      graph = nx.DiGraph(adjacency_matrix)
+
     else:
         raise NotImplementedError(f"Graph {graph} not implemented")
 
