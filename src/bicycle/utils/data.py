@@ -144,7 +144,7 @@ def create_data(
         alpha = 1.0 * torch.ones(
             N, device=device
         )  # torch.distributions.Gamma(0.5, 1).sample((N,)).to(device)
-        sigma_p = 0.001 * torch.ones(N, device=device)
+        sigma_p = 0.1 * torch.ones(N, device=device)
         # prev: sigma = 0.1 * torch.ones(N, device=device)
         sigma = 0.1 * torch.ones(
             N, device=device

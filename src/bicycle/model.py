@@ -44,41 +44,82 @@ class Encoder(nn.Module):
 
 
 class Omega_Iterative(pl.LightningModule):
-    def __init__(self, alpha, beta, sigma, lr=1e-2, sigma_min=1e-3, device="cpu"):
-
+    def __init__(
+        self,
+        alphas,
+        betas,
+        B,
+        sigmas,
+        lr = 1e-2,
+        sigma_min = 1e-3,        
+        device = "cpu",
+        rank_w_cov_factor = 0):
+        
         super().__init__()
         super().to(device)
 
-        print("setting device to:", device)
+        self.pos = nn.Softplus()
+        
+        self.n_regimes = alphas.shape[0]
 
-        self.alpha = alpha.detach().to(device)
-        self.beta = beta.detach().to(device)
-        self.sigma = sigma.detach().to(device)
-        self.n_genes = alpha.shape[0]
-        self.lr = lr
         self.sigma_min = sigma_min
+        
+        print('setting device to:',device)
+        
+        self.alphas = alphas.detach().to(device)
+        self.betas = betas.detach().to(device)
+        self.B = B.detach().to(device)
+        self.sigmas = sigmas.detach().to(device)
+        self.n_genes = alphas.shape[-1]
 
-        self.omega = torch.nn.Parameter(0.1 * torch.randn((self.n_genes, self.n_genes), device=device))
+        self.loss = list()
 
-        self.B = torch.eye(self.n_genes, device=self.device) - (
-            1.0 - torch.eye(self.n_genes, device=self.device)
-        ) * beta.transpose(0, 1)
-
+        if rank_w_cov_factor > 0 and rank_w_cov_factor <= self.n_genes:
+            self.rank_w_cov_factor = rank_w_cov_factor
+        else:
+            self.rank_w_cov_factor = self.n_genes
+        
+        self.lr = lr
+        
+        self.sigma_min = sigma_min
+        
+        self.w_cov_diag = torch.nn.Parameter(
+                        torch.exp(
+                            0.1
+                            * torch.rand(
+                                (
+                                    self.n_genes,
+                                )
+                            )
+                        )
+                    )
+        self.w_cov_factor = torch.nn.Parameter(
+            0.1 * torch.randn((self.n_genes, self.rank_w_cov_factor))
+        )
+        
     def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=self.lr)
-
+        return optim.Adam(self.parameters(), lr=self.lr)        
+        
     def training_step(self, batch):
+        
+        loss_lyapunov = torch.sum(torch.square(self.lyapunov_lhs() - self.lyapunov_rhs())) / (
+                self.n_genes**2
+            )        
 
-        loss_lyapunov = torch.sum(torch.square(self.lyapunov_lhs() - self.lyapunov_rhs())) / (self.n_genes**2)
-
+        #print("\rLyapunov loss: %.2f" % loss_lyapunov)
+        self.loss.append(loss_lyapunov.item())
+        
         return loss_lyapunov
 
     def lyapunov_lhs(self):
-        mat = self.B.detach() @ self.omega
+        mat = self.B.detach() @ (
+            torch.diag_embed(self.pos(self.w_cov_diag) + self.sigma_min)
+            + self.w_cov_factor @ self.w_cov_factor.transpose(0, 1)
+        )
         return mat + mat.transpose(0, 1)
 
     def lyapunov_rhs(self):
-        return self.sigma.detach() @ self.sigma.detach().transpose(0, 1)
+        return self.sigmas.detach() @ self.sigmas.transpose(0, 1).detach()
 
 
 class BICYCLE(pl.LightningModule):
@@ -906,98 +947,64 @@ class BICYCLE(pl.LightningModule):
 
         return x_bar
 
-    def predict_perturbation(
-        self,
-        target_idx,
-        target_mu=[],
-        target_std=[],
-        max_epochs=1000,
-        perturbation_type=[],
-        perturbation_like=[],
-    ):
-
+    def predict_perturbation(self, target_idx, target_mu = [], target_std = [], max_epochs = 1000, perturbation_type = [], perturbation_like = []):
+   
         self.gt_interv.to(self.device)
-
-        print("GT_INTERV.DEVICE:", self.gt_interv.device)
 
         # first: calculate values for alpha_p and sigma_p for the given targets
         # c.f. stationary distribution of univariate Ornstein-Uhlenbeck process,
         # e.g., here: https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process
-        sigma_p = math.sqrt(2.0) * torch.tensor(
-            np.asarray(target_std), device=self.device, dtype=self.sigma.dtype
-        )
-        alpha_p = torch.tensor(np.asarray(target_mu), device=self.device, dtype=self.alpha.dtype)
-
+        sigma_p = math.sqrt(2.0)*torch.tensor(np.asarray(target_std),device = self.device, dtype = self.sigma.dtype)
+        alpha_p = torch.tensor(np.asarray(target_mu),device = self.device, dtype = self.alpha.dtype)
+        
         gt_interv_orig = self.gt_interv
-
-        self.gt_interv = torch.zeros((self.n_genes, 1))
-        self.gt_interv[target_idx, 0] = 1
-        self.gt_interv.to(gt_interv_orig.device)
+        
+        self.gt_interv = torch.zeros((self.n_genes,1))
+        self.gt_interv[target_idx,0] = 1
+        self.gt_interv.to(gt_interv_orig.device)        
         alpha, beta, B, sigma = self.get_updated_states()
         self.gt_interv = gt_interv_orig
-
+        
         alpha = alpha[0]
         beta = beta[0]
         sigma = sigma[0]
+        B = B[0]
+
         sigma = torch.diagonal(sigma, offset=0, dim1=-2, dim2=-1)
+
+        x_bar = torch.mm(torch.linalg.inv(B), alpha[:,None])
 
         # In case use explicitly specified expected means and standard deviations
         # for LATENT expression, use these
         if len(target_mu) == len(target_idx) and len(target_std) == len(target_idx):
             alpha[target_idx] = alpha_p
             sigma[target_idx] = sigma_p
-
-        # Use specified perturbed training genes, which they assume to show target-gene perturbation effects
-        # similar to those expected for the predicted interventions
-        elif len(perturbation_like) == len(target_idx):
-
-            print("test")
-            # TODO take corresponding alpha_p and sigma_p values from the provided list of similar
-            # training perturbations
-
-        # Otherwise, make some informed guesses based on training perturbations
-        elif perturbation_type == "CRISPRa":
-            # Take maximum mean of perturbed training genes
-
-            # TODO: Make sure to only include training genes!
-            # CRISPRa
-            alpha_p_val = torch.max(self.alpha_p)
-            # Get std from the same gene
-            # sigma_p_val =
-        elif perturbation_type == "CRISPRi":
-            # Take minimum mean of perturbed training genes
-
-            ## TODO: Make sure to only include training genes!
-            alpha_p_val = torch.min(self.alpha_p)
-            # Get std from the same gene
-            # sigma_p_val =
-        elif perturbation_type == "CRISPRko":
-            # CRISPRko
-            alpha_p_val = 0.0
-            # Take minimum STD of perturbed training genes
-
-            # TODO: Make sure to only include training genes!
-            sigma_p_val = torch.min(self.sigma_p)
-
+       
         sigma = torch.diag_embed(sigma)
-
-        omega_model = Omega_Iterative(alpha, beta, sigma, device=self.device)
-
+       
+        omega_model = Omega_Iterative(alpha, beta, B, sigma, device = self.device)
+        
         # Empty dataloader, just so PL won't complain
-        dataset = TensorDataset(torch.zeros((1, 1)))
+        dataset = TensorDataset(torch.zeros((1,1)))
         dataloader = DataLoader(dataset)
-
+        
         trainer = pl.Trainer(
             max_epochs=max_epochs,
-            accelerator="cpu",  # if str(device).startswith("cuda") else "cpu",
-            # devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
-            num_sanity_val_steps=0,
+            accelerator='cpu',  # if str(device).startswith("cuda") else "cpu",
+            #devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
+            num_sanity_val_steps=0
         )
-
-        start_time = time.time()
-        trainer.fit(omega_model, dataloader)
+        
+        start_time = time.time()    
+        trainer.fit(omega_model, dataloader)    
         end_time = time.time()
-        print(f"Training took {end_time - start_time:.2f} seconds")
+
+        self.omega_model = omega_model
+
+        omega = ( torch.diag_embed(omega_model.pos(omega_model.w_cov_diag) + omega_model.sigma_min)
+                   + omega_model.w_cov_factor @ omega_model.w_cov_factor.transpose(0, 1) )
+
+        return x_bar, omega
 
     def forward(self):
         raise NotImplementedError()
