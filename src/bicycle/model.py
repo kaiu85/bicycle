@@ -947,7 +947,7 @@ class BICYCLE(pl.LightningModule):
 
         return x_bar
 
-    def predict_perturbation(self, target_idx, target_mu = [], target_std = [], max_epochs = 1000, perturbation_type = [], perturbation_like = []):
+    def predict_perturbation(self, target_idx, target_mu = [], target_std = [], max_epochs = 1000, predict_omega = True):
    
         self.gt_interv.to(self.device)
 
@@ -969,10 +969,7 @@ class BICYCLE(pl.LightningModule):
         beta = beta[0]
         sigma = sigma[0]
         B = B[0]
-
         sigma = torch.diagonal(sigma, offset=0, dim1=-2, dim2=-1)
-
-        x_bar = torch.mm(torch.linalg.inv(B), alpha[:,None])
 
         # In case use explicitly specified expected means and standard deviations
         # for LATENT expression, use these
@@ -982,29 +979,37 @@ class BICYCLE(pl.LightningModule):
        
         sigma = torch.diag_embed(sigma)
        
-        omega_model = Omega_Iterative(alpha, beta, B, sigma, device = self.device)
-        
-        # Empty dataloader, just so PL won't complain
-        dataset = TensorDataset(torch.zeros((1,1)))
-        dataloader = DataLoader(dataset)
-        
-        trainer = pl.Trainer(
-            max_epochs=max_epochs,
-            accelerator='cpu',  # if str(device).startswith("cuda") else "cpu",
-            #devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
-            num_sanity_val_steps=0
-        )
-        
-        start_time = time.time()    
-        trainer.fit(omega_model, dataloader)    
-        end_time = time.time()
+        x_bar = torch.mm(torch.linalg.inv(B), alpha[:,None])
 
-        self.omega_model = omega_model
+        if predict_omega:
 
-        omega = ( torch.diag_embed(omega_model.pos(omega_model.w_cov_diag) + omega_model.sigma_min)
-                   + omega_model.w_cov_factor @ omega_model.w_cov_factor.transpose(0, 1) )
+          omega_model = Omega_Iterative(alpha, beta, B, sigma, device = self.device)
+          
+          # Empty dataloader, just so PL won't complain
+          dataset = TensorDataset(torch.zeros((1,1)))
+          dataloader = DataLoader(dataset)
+          
+          trainer = pl.Trainer(
+              max_epochs=max_epochs,
+              accelerator='cpu',  # if str(device).startswith("cuda") else "cpu",
+              #devices=[GPU_DEVICE],  # if str(device).startswith("cuda") else 1,
+              num_sanity_val_steps=0
+          )
+          
+          start_time = time.time()    
+          trainer.fit(omega_model, dataloader)    
+          end_time = time.time()
 
-        return x_bar, omega
+          self.omega_model = omega_model
+
+          omega = ( torch.diag_embed(omega_model.pos(omega_model.w_cov_diag) + omega_model.sigma_min)
+                    + omega_model.w_cov_factor @ omega_model.w_cov_factor.transpose(0, 1) )
+
+          return x_bar, omega
+
+        else:
+
+          return x_bar
 
     def forward(self):
         raise NotImplementedError()
